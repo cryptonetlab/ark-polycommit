@@ -6,6 +6,7 @@ on:
       - master
 env:
   RUST_BACKTRACE: 1
+  RUSTFLAGS: "--emit asm -C llvm-args=-x86-asm-syntax=intel"
 
 jobs:
   style:

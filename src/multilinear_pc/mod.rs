@@ -147,11 +147,8 @@ impl<E: PairingEngine> MultilinearPC<E> {
             .into_iter()
             .map(|x| x.into_bigint())
             .collect();
-        let g_product = <E::G1Projective as VariableBaseMSM>::msm_bigint(
-            &ck.powers_of_g[0],
-            scalars.as_slice(),
-        )
-        .into_affine();
+        let g_product =
+            VariableBaseMSM::multi_scalar_mul(&ck.powers_of_g[0], scalars.as_slice()).into_affine();
         Commitment { nv, g_product }
     }
 
@@ -253,7 +250,7 @@ fn remove_dummy_variable<F: Field>(poly: &[F], pad: usize) -> Vec<F> {
 /// generate eq(t,x), a product of multilinear polynomials with fixed t.
 /// eq(a,b) is takes extensions of a,b in {0,1}^num_vars such that if a and b in {0,1}^num_vars are equal
 /// then this polynomial evaluates to 1.
-fn eq_extension<F: Field>(t: &[F]) -> Vec<DenseMultilinearExtension<F>> {
+pub fn eq_extension<F: Field>(t: &[F]) -> Vec<DenseMultilinearExtension<F>> {
     let dim = t.len();
     let mut result = Vec::new();
     for i in 0..dim {
