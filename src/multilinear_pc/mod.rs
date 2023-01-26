@@ -1,3 +1,6 @@
+use self::data_structures::{Commitment_G2, Proof_G1};
+
+use super::timer::Timer;
 use crate::multilinear_pc::data_structures::{
     Commitment, CommitterKey, Proof, UniversalParams, VerifierKey,
 };
@@ -102,15 +105,28 @@ impl<E: PairingEngine> MultilinearPC<E> {
                 &t,
             ))
         };
+
+        let h_mask = {
+            let window_size = FixedBaseMSM::get_mul_window_size(num_vars);
+            let h_table =
+                FixedBaseMSM::get_window_table(scalar_bits, window_size, h.into_projective());
+            E::G2Projective::batch_normalization_into_affine(&FixedBaseMSM::multi_scalar_mul(
+                scalar_bits,
+                window_size,
+                &h_table,
+                &t,
+            ))
+        };
         // end_timer!(vp_generation_timer);
 
         UniversalParams {
             num_vars,
             g,
-            g_mask,
             h,
             powers_of_g,
             powers_of_h,
+            g_mask,
+            h_mask,
         }
     }
 
@@ -135,6 +151,7 @@ impl<E: PairingEngine> MultilinearPC<E> {
             g: params.g,
             h: params.h,
             g_mask_random: (&params.g_mask[to_reduce..]).to_vec(),
+            h_mask_random: (&params.h_mask[to_reduce..]).to_vec(),
         };
         (ck, vk)
     }
@@ -153,6 +170,21 @@ impl<E: PairingEngine> MultilinearPC<E> {
         let g_product =
             VariableBaseMSM::multi_scalar_mul(&ck.powers_of_g[0], scalars.as_slice()).into_affine();
         Commitment { nv, g_product }
+    }
+
+    pub fn commit_g2(
+        ck: &CommitterKey<E>,
+        polynomial: &impl MultilinearExtension<E::Fr>,
+    ) -> Commitment_G2<E> {
+        let nv = polynomial.num_vars();
+        let scalars: Vec<_> = polynomial
+            .to_evaluations()
+            .into_iter()
+            .map(|x| x.into_repr())
+            .collect();
+        let h_product =
+            VariableBaseMSM::multi_scalar_mul(&ck.powers_of_h[0], scalars.as_slice()).into_affine();
+        Commitment_G2 { nv, h_product }
     }
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the same.
@@ -204,8 +236,102 @@ impl<E: PairingEngine> MultilinearPC<E> {
         Proof { proofs: proofs }
     }
 
+    pub fn open_g1(
+        ck: &CommitterKey<E>,
+        polynomial: &impl MultilinearExtension<E::Fr>,
+        point: &[E::Fr],
+    ) -> Proof_G1<E> {
+        assert_eq!(polynomial.num_vars(), ck.nv, "Invalid size of polynomial");
+        let nv = polynomial.num_vars();
+        let mut r: Vec<Vec<E::Fr>> = (0..nv + 1).map(|_| Vec::new()).collect();
+        let mut q: Vec<Vec<E::Fr>> = (0..nv + 1).map(|_| Vec::new()).collect();
+
+        r[nv] = polynomial.to_evaluations();
+
+        let mut thread_handles = vec![];
+        let proofs: Vec<_> = vec![E::G1Affine::zero(); nv];
+
+        let mut i = 0;
+        for mut p in proofs {
+            let k = nv - i;
+            let point_at_k = point[i];
+            q[k] = (0..(1 << (k - 1))).map(|_| E::Fr::zero()).collect();
+            r[k - 1] = (0..(1 << (k - 1))).map(|_| E::Fr::zero()).collect();
+            for b in 0..(1 << (k - 1)) {
+                q[k][b] = r[k][(b << 1) + 1] - &r[k][b << 1];
+                r[k - 1][b] = r[k][b << 1] * &(E::Fr::one() - &point_at_k)
+                    + &(r[k][(b << 1) + 1] * &point_at_k);
+            }
+            let scalars: Vec<_> = (0..(1 << k))
+                .map(|x| q[k][x >> 1].into_repr()) // fine
+                .collect();
+            let pg = ck.powers_of_g[i].clone();
+            thread_handles.push(thread::spawn(move || {
+                p = VariableBaseMSM::multi_scalar_mul(&pg, &scalars).into_affine();
+                p
+            }));
+
+            i = i + 1;
+        }
+
+        let proofs = thread_handles
+            .into_iter()
+            .map(|g| g.join().unwrap())
+            .collect();
+
+        Proof_G1 { proofs: proofs }
+    }
+
     /// Verifies that `value` is the evaluation at `x` of the polynomial
     /// committed inside `comm`.
+    pub fn check_2<'a>(
+        vk: &VerifierKey<E>,
+        commitment: &Commitment_G2<E>,
+        point: &[E::Fr],
+        value: E::Fr,
+        proof: &Proof_G1<E>,
+    ) -> bool {
+        let left = E::pairing(
+            vk.g,
+            commitment.h_product.into_projective() - &vk.h.mul(value),
+        );
+        // println!("left is {:?}", left);
+
+        let scalar_size = E::Fr::size_in_bits();
+        let window_size = FixedBaseMSM::get_mul_window_size(vk.nv);
+
+        let h_table =
+            FixedBaseMSM::get_window_table(scalar_size, window_size, vk.h.into_projective());
+        let h_mul: Vec<E::G2Projective> =
+            FixedBaseMSM::multi_scalar_mul(scalar_size, window_size, &h_table, point);
+
+        let pairing_rights: Vec<_> = (0..vk.nv)
+            .into_iter()
+            .map(|i| vk.h_mask_random[i].into_projective() - &h_mul[i])
+            .collect();
+        let pairing_rights: Vec<E::G2Affine> =
+            E::G2Projective::batch_normalization_into_affine(&pairing_rights);
+        let pairing_rights: Vec<E::G2Prepared> = pairing_rights
+            .into_iter()
+            .map(|x| E::G2Prepared::from(x))
+            .collect();
+
+        let pairing_lefts: Vec<E::G1Prepared> = proof
+            .proofs
+            .iter()
+            .map(|x| E::G1Prepared::from(*x))
+            .collect();
+
+        let pairings: Vec<_> = pairing_lefts
+            .into_iter()
+            .zip(pairing_rights.into_iter())
+            .collect();
+        let right = E::product_of_pairings(pairings.iter());
+        // println!("right is {:?}", right);
+
+        left == right
+    }
+
     pub fn check<'a>(
         vk: &VerifierKey<E>,
         commitment: &Commitment<E>,
@@ -311,6 +437,34 @@ mod tests {
         let value = poly.evaluate(&point).unwrap();
         let result = MultilinearPC::check(&vk, &com, &point, value, &proof);
         assert!(result);
+    }
+
+    fn test_polynomial_g2<R: RngCore>(
+        uni_params: &UniversalParams<E>,
+        poly: &impl MultilinearExtension<Fr>,
+        rng: &mut R,
+    ) {
+        let nv = poly.num_vars();
+        assert_ne!(nv, 0);
+        let (ck, vk) = MultilinearPC::<E>::trim(&uni_params, nv);
+        let point: Vec<_> = (0..nv).map(|_| Fr::rand(rng)).collect();
+        let com = MultilinearPC::commit_g2(&ck, poly);
+        let proof = MultilinearPC::open_g1(&ck, poly, &point);
+
+        let value = poly.evaluate(&point).unwrap();
+        let result = MultilinearPC::check_2(&vk, &com, &point, value, &proof);
+        assert!(result);
+    }
+
+    #[test]
+    fn test() {
+        let mut rng = test_rng();
+
+        // normal polynomials
+        let uni_params = MultilinearPC::setup(2, &mut rng);
+
+        let poly1 = DenseMultilinearExtension::rand(2, &mut rng);
+        test_polynomial_g2(&uni_params, &poly1, &mut rng);
     }
 
     #[test]
