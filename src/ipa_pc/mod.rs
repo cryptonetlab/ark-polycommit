@@ -3,7 +3,7 @@ use crate::{BatchLCProof, DenseUVPolynomial, Error, Evaluations, QuerySet};
 use crate::{LabeledCommitment, LabeledPolynomial, LinearCombination};
 use crate::{PCCommitterKey, PCRandomness, PCUniversalParams, PolynomialCommitment};
 
-use ark_ec::{msm::VariableBaseMSM, AffineCurve, ProjectiveCurve};
+use ark_ec::{VariableBaseMSM, AffineRepr, CurveGroup};
 use ark_ff::{Field, One, PrimeField, UniformRand, Zero};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::RngCore;
@@ -33,7 +33,7 @@ use digest::Digest;
 /// [pcdas]: https://eprint.iacr.org/2020/499
 /// [marlin]: https://eprint.iacr.org/2019/1047
 pub struct InnerProductArgPC<
-    G: AffineCurve,
+    G: AffineRepr,
     D: Digest,
     P: DenseUVPolynomial<G::ScalarField>,
     S: CryptographicSponge,
@@ -46,7 +46,7 @@ pub struct InnerProductArgPC<
 
 impl<G, D, P, S> InnerProductArgPC<G, D, P, S>
 where
-    G: AffineCurve,
+    G: AffineRepr,
     G::Projective: VariableBaseMSM<MSMBase = G, Scalar = G::ScalarField>,
     D: Digest,
     P: DenseUVPolynomial<G::ScalarField>,
@@ -337,7 +337,7 @@ where
 
 impl<G, D, P, S> PolynomialCommitment<G::ScalarField, P, S> for InnerProductArgPC<G, D, P, S>
 where
-    G: AffineCurve,
+    G: AffineRepr,
     G::Projective: VariableBaseMSM<MSMBase = G, Scalar = G::ScalarField>,
     D: Digest,
     P: DenseUVPolynomial<G::ScalarField, Point = G::ScalarField>,
@@ -1075,7 +1075,7 @@ mod tests {
     #![allow(non_camel_case_types)]
 
     use super::InnerProductArgPC;
-    use ark_ec::AffineCurve;
+    use ark_ec::AffineRepr;
     use ark_ed_on_bls12_381::{EdwardsAffine, Fr};
     use ark_ff::PrimeField;
     use ark_poly::{univariate::DensePolynomial as DensePoly, DenseUVPolynomial};
@@ -1084,7 +1084,7 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
 
     type UniPoly = DensePoly<Fr>;
-    type Sponge = PoseidonSponge<<EdwardsAffine as AffineCurve>::ScalarField>;
+    type Sponge = PoseidonSponge<<EdwardsAffine as AffineRepr>::ScalarField>;
     type PC<E, D, P, S> = InnerProductArgPC<E, D, P, S>;
     type PC_JJB2S = PC<EdwardsAffine, Blake2s, UniPoly, Sponge>;
 

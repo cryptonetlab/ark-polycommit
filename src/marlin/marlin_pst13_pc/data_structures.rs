@@ -2,7 +2,7 @@ use crate::{BTreeMap, Vec};
 use crate::{
     PCCommitterKey, PCPreparedVerifierKey, PCProof, PCRandomness, PCUniversalParams, PCVerifierKey,
 };
-use ark_ec::PairingEngine;
+use ark_ec::pairing::Pairing;
 use ark_ff::Zero;
 use ark_poly::DenseMVPolynomial;
 use ark_std::{
@@ -11,7 +11,9 @@ use ark_std::{
     ops::{Add, AddAssign, Index},
 };
 
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Validate,
+};
 use ark_std::rand::RngCore;
 
 /// `UniversalParams` are the universal parameters for the MarlinPST13 scheme.
@@ -19,9 +21,9 @@ use ark_std::rand::RngCore;
 #[derivative(Default(bound = ""), Clone(bound = ""), Debug(bound = ""))]
 pub struct UniversalParams<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     /// Contains group elements corresponding to all possible monomials with
     /// `num_vars` and maximum degree `max_degree` evaluated at `\beta`
@@ -50,28 +52,33 @@ where
 
 impl<E, P> CanonicalSerialize for UniversalParams<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
-    fn serialize<W: Write>(&self, mut writer: W) -> Result<(), SerializationError> {
-        self.powers_of_g.serialize(&mut writer)?;
-        self.gamma_g.serialize(&mut writer)?;
-        self.powers_of_gamma_g.serialize(&mut writer)?;
-        self.h.serialize(&mut writer)?;
-        self.beta_h.serialize(&mut writer)?;
-        self.num_vars.serialize(&mut writer)?;
-        self.max_degree.serialize(&mut writer)
+    fn serialize_with_mode<W: Write>(
+        &self,
+        writer: W,
+        compress: ark_serialize::Compress,
+    ) -> Result<(), SerializationError> {
+        self.powers_of_g
+            .serialize_with_mode(&mut writer, compress)?;
+        self.gamma_g.serialize(&mut writer, compress)?;
+        self.powers_of_gamma_g.serialize(&mut writer, compress)?;
+        self.h.serialize(&mut writer, compress)?;
+        self.beta_h.serialize(&mut writer, compress)?;
+        self.num_vars.serialize(&mut writer, compress)?;
+        self.max_degree.serialize(&mut writer, compress)
     }
 
-    fn serialized_size(&self) -> usize {
-        self.powers_of_g.serialized_size()
-            + self.gamma_g.serialized_size()
-            + self.powers_of_gamma_g.serialized_size()
-            + self.h.serialized_size()
-            + self.beta_h.serialized_size()
-            + self.num_vars.serialized_size()
-            + self.max_degree.serialized_size()
+    fn serialized_size(&self, compress: ark_serialize::Compress) -> usize {
+        self.powers_of_g.serialized_size(compress)
+            + self.gamma_g.serialized_size(compress)
+            + self.powers_of_gamma_g.serialized_size(compress)
+            + self.h.serialized_size(compress)
+            + self.beta_h.serialized_size(compress)
+            + self.num_vars.serialized_size(compress)
+            + self.max_degree.serialized_size(compress)
     }
 
     fn serialize_uncompressed<W: Write>(&self, mut writer: W) -> Result<(), SerializationError> {
@@ -84,16 +91,6 @@ where
         self.max_degree.serialize_uncompressed(&mut writer)
     }
 
-    fn serialize_unchecked<W: Write>(&self, mut writer: W) -> Result<(), SerializationError> {
-        self.powers_of_g.serialize_unchecked(&mut writer)?;
-        self.gamma_g.serialize_unchecked(&mut writer)?;
-        self.powers_of_gamma_g.serialize_unchecked(&mut writer)?;
-        self.h.serialize_unchecked(&mut writer)?;
-        self.beta_h.serialize_unchecked(&mut writer)?;
-        self.num_vars.serialize_unchecked(&mut writer)?;
-        self.max_degree.serialize_unchecked(&mut writer)
-    }
-
     fn uncompressed_size(&self) -> usize {
         self.powers_of_g.uncompressed_size()
             + self.gamma_g.uncompressed_size()
@@ -103,22 +100,40 @@ where
             + self.num_vars.uncompressed_size()
             + self.max_degree.uncompressed_size()
     }
+    fn compressed_size(&self) -> usize {
+        self.powers_of_g.compressed_size()
+            + self.gamma_g.compressed_size()
+            + self.powers_of_gamma_g.compressed_size()
+            + self.h.compressed_size()
+            + self.beta_h.compressed_size()
+            + self.num_vars.compressed_size()
+            + self.max_degree.compressed_size()
+    }
 }
 
 impl<E, P> CanonicalDeserialize for UniversalParams<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
-    fn deserialize<R: Read>(mut reader: R) -> Result<Self, SerializationError> {
-        let powers_of_g = BTreeMap::<P::Term, E::G1Affine>::deserialize(&mut reader)?;
-        let gamma_g = E::G1Affine::deserialize(&mut reader)?;
-        let powers_of_gamma_g = Vec::<Vec<E::G1Affine>>::deserialize(&mut reader)?;
-        let h = E::G2Affine::deserialize(&mut reader)?;
-        let beta_h = Vec::<E::G2Affine>::deserialize(&mut reader)?;
-        let num_vars = usize::deserialize(&mut reader)?;
-        let max_degree = usize::deserialize(&mut reader)?;
+    fn deserialize_with_mode<R: Read>(
+        reader: R,
+        compress: ark_serialize::Compress,
+        validate: ark_serialize::Validate,
+    ) -> Result<Self, SerializationError> {
+        let powers_of_g = BTreeMap::<P::Term, E::G1Affine>::deserialize_with_mode(
+            &mut reader,
+            compress,
+            validate,
+        )?;
+        let gamma_g = E::G1Affine::deserialize_with_mode(&mut reader, compress, validate)?;
+        let powers_of_gamma_g =
+            Vec::<Vec<E::G1Affine>>::deserialize_with_mode(&mut reader, compress, validate)?;
+        let h = E::G2Affine::deserialize_with_mode(&mut reader, compress, validate)?;
+        let beta_h = Vec::<E::G2Affine>::deserialize_with_mode(&mut reader, compress, validate)?;
+        let num_vars = usize::deserialize_with_mode(&mut reader, compress, validate)?;
+        let max_degree = usize::deserialize_with_mode(&mut reader, compress, validate)?;
 
         let prepared_beta_h = beta_h.iter().map(|x| x.clone().into()).collect();
         Ok(Self {
@@ -135,57 +150,42 @@ where
     }
 
     fn deserialize_uncompressed<R: Read>(mut reader: R) -> Result<Self, SerializationError> {
-        let powers_of_g = BTreeMap::<P::Term, E::G1Affine>::deserialize_uncompressed(&mut reader)?;
-        let gamma_g = E::G1Affine::deserialize_uncompressed(&mut reader)?;
-        let powers_of_gamma_g = Vec::<Vec<E::G1Affine>>::deserialize_uncompressed(&mut reader)?;
-        let h = E::G2Affine::deserialize_uncompressed(&mut reader)?;
-        let beta_h = Vec::<E::G2Affine>::deserialize_uncompressed(&mut reader)?;
-        let num_vars = usize::deserialize_uncompressed(&mut reader)?;
-        let max_degree = usize::deserialize_uncompressed(&mut reader)?;
-
-        let prepared_beta_h = beta_h.iter().map(|x| x.clone().into()).collect();
-        Ok(Self {
-            powers_of_g,
-            gamma_g,
-            powers_of_gamma_g,
-            h,
-            beta_h,
-            prepared_h: h.into(),
-            prepared_beta_h,
-            num_vars,
-            max_degree,
-        })
+        Self::deserialize_with_mode(
+            reader,
+            ark_serialize::Compress::No,
+            ark_serialize::Validate::Yes,
+        )
     }
-
-    fn deserialize_unchecked<R: Read>(mut reader: R) -> Result<Self, SerializationError> {
-        let powers_of_g = BTreeMap::<P::Term, E::G1Affine>::deserialize_unchecked(&mut reader)?;
-        let gamma_g = E::G1Affine::deserialize_unchecked(&mut reader)?;
-        let powers_of_gamma_g = Vec::<Vec<E::G1Affine>>::deserialize_unchecked(&mut reader)?;
-        let h = E::G2Affine::deserialize_unchecked(&mut reader)?;
-        let beta_h = Vec::<E::G2Affine>::deserialize_unchecked(&mut reader)?;
-        let num_vars = usize::deserialize_unchecked(&mut reader)?;
-        let max_degree = usize::deserialize_unchecked(&mut reader)?;
-
-        let prepared_beta_h = beta_h.iter().map(|x| x.clone().into()).collect();
-        Ok(Self {
-            powers_of_g,
-            gamma_g,
-            powers_of_gamma_g,
-            h,
-            beta_h,
-            prepared_h: h.into(),
-            prepared_beta_h,
-            num_vars,
-            max_degree,
-        })
+    fn deserialize_uncompressed_unchecked<R: Read>(reader: R) -> Result<Self, SerializationError> {
+        Self::deserialize_with_mode(
+            reader,
+            ark_serialize::Compress::No,
+            ark_serialize::Validate::No,
+        )
+    }
+    fn deserialize_compressed_unchecked<R: Read>(
+        mut reader: R,
+    ) -> Result<Self, SerializationError> {
+        Self::deserialize_with_mode(
+            reader,
+            ark_serialize::Compress::Yes,
+            ark_serialize::Validate::No,
+        )
+    }
+    fn deserialize_compressed<R: Read>(mut reader: R) -> Result<Self, SerializationError> {
+        Self::deserialize_with_mode(
+            reader,
+            ark_serialize::Compress::Yes,
+            ark_serialize::Validate::Yes,
+        )
     }
 }
 
 impl<E, P> PCUniversalParams for UniversalParams<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     fn max_degree(&self) -> usize {
         self.max_degree
@@ -198,9 +198,9 @@ where
 #[derivative(Hash(bound = ""), Clone(bound = ""), Debug(bound = ""))]
 pub struct CommitterKey<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     /// Contains group elements corresponding to all possible monomials with
     /// `num_vars` and maximum degree `supported_degree` evaluated at `\beta`
@@ -222,9 +222,9 @@ where
 
 impl<E, P> PCCommitterKey for CommitterKey<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     fn max_degree(&self) -> usize {
         self.max_degree
@@ -238,7 +238,7 @@ where
 /// `VerifierKey` is used to check evaluation proofs for a given commitment.
 #[derive(Derivative)]
 #[derivative(Default(bound = ""), Clone(bound = ""), Debug(bound = ""))]
-pub struct VerifierKey<E: PairingEngine> {
+pub struct VerifierKey<E: Pairing> {
     /// The generator of G1.
     pub g: E::G1Affine,
     /// The generator of G1 that is used for making a commitment hiding.
@@ -264,67 +264,60 @@ pub struct VerifierKey<E: PairingEngine> {
     pub max_degree: usize,
 }
 
-impl<E: PairingEngine> CanonicalSerialize for VerifierKey<E> {
-    fn serialize<W: Write>(&self, mut writer: W) -> Result<(), SerializationError> {
-        self.g.serialize(&mut writer)?;
-        self.gamma_g.serialize(&mut writer)?;
-        self.h.serialize(&mut writer)?;
-        self.beta_h.serialize(&mut writer)?;
-        self.num_vars.serialize(&mut writer)?;
-        self.supported_degree.serialize(&mut writer)?;
-        self.max_degree.serialize(&mut writer)
+impl<E: Pairing> CanonicalSerialize for VerifierKey<E> {
+    fn serialize_with_mode<W: Write>(
+        &self,
+        writer: W,
+        compress: ark_serialize::Compress,
+    ) -> Result<(), SerializationError> {
+        self.g.serialize_with_mode(&mut writer, compress)?;
+        self.gamma_g.serialize_with_mode(&mut writer, compress)?;
+        self.h.serialize_with_mode(&mut writer, compress)?;
+        self.beta_h.serialize_with_mode(&mut writer, compress)?;
+        self.num_vars.serialize_with_mode(&mut writer, compress)?;
+        self.supported_degree
+            .serialize_with_mode(&mut writer, compress)?;
+        self.max_degree.serialize_with_mode(&mut writer, compress)
     }
 
-    fn serialized_size(&self) -> usize {
-        self.g.serialized_size()
-            + self.gamma_g.serialized_size()
-            + self.h.serialized_size()
-            + self.beta_h.serialized_size()
-            + self.num_vars.serialized_size()
-            + self.supported_degree.serialized_size()
-            + self.max_degree.serialized_size()
+    fn serialized_size(&self, compress: ark_serialize::Compress) -> usize {
+        self.g.serialized_size(compress)
+            + self.gamma_g.serialized_size(compress)
+            + self.h.serialized_size(compress)
+            + self.beta_h.serialized_size(compress)
+            + self.num_vars.serialized_size(compress)
+            + self.supported_degree.serialized_size(compress)
+            + self.max_degree.serialized_size(compress)
     }
 
     fn serialize_uncompressed<W: Write>(&self, mut writer: W) -> Result<(), SerializationError> {
-        self.g.serialize_uncompressed(&mut writer)?;
-        self.gamma_g.serialize_uncompressed(&mut writer)?;
-        self.h.serialize_uncompressed(&mut writer)?;
-        self.beta_h.serialize_uncompressed(&mut writer)?;
-        self.num_vars.serialize_uncompressed(&mut writer)?;
-        self.supported_degree.serialize_uncompressed(&mut writer)?;
-        self.max_degree.serialize_uncompressed(&mut writer)
+        Self::serialize_with_mode(&self, writer, Compress::No)
     }
-
-    fn serialize_unchecked<W: Write>(&self, mut writer: W) -> Result<(), SerializationError> {
-        self.g.serialize_unchecked(&mut writer)?;
-        self.gamma_g.serialize_unchecked(&mut writer)?;
-        self.h.serialize_unchecked(&mut writer)?;
-        self.beta_h.serialize_unchecked(&mut writer)?;
-        self.num_vars.serialize_unchecked(&mut writer)?;
-        self.supported_degree.serialize_unchecked(&mut writer)?;
-        self.max_degree.serialize_unchecked(&mut writer)
+    fn serialize_compressed<W: Write>(&self, mut writer: W) -> Result<(), SerializationError> {
+        Self::serialize_with_mode(&self, writer, Compress::Yes)
     }
 
     fn uncompressed_size(&self) -> usize {
-        self.g.uncompressed_size()
-            + self.gamma_g.uncompressed_size()
-            + self.h.uncompressed_size()
-            + self.beta_h.uncompressed_size()
-            + self.num_vars.uncompressed_size()
-            + self.supported_degree.uncompressed_size()
-            + self.max_degree.uncompressed_size()
+        Self::serialized_size(&self, Compress::No)
+    }
+    fn compressed_size(&self) -> usize {
+        Self::serialized_size(&self, Compress::Yes)
     }
 }
 
-impl<E: PairingEngine> CanonicalDeserialize for VerifierKey<E> {
-    fn deserialize<R: Read>(mut reader: R) -> Result<Self, SerializationError> {
-        let g = E::G1Affine::deserialize(&mut reader)?;
-        let gamma_g = E::G1Affine::deserialize(&mut reader)?;
-        let h = E::G2Affine::deserialize(&mut reader)?;
-        let beta_h = Vec::<E::G2Affine>::deserialize(&mut reader)?;
-        let num_vars = usize::deserialize(&mut reader)?;
-        let supported_degree = usize::deserialize(&mut reader)?;
-        let max_degree = usize::deserialize(&mut reader)?;
+impl<E: Pairing> CanonicalDeserialize for VerifierKey<E> {
+    fn deserialize_with_mode<R: Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        let g = E::G1Affine::deserialize_with_mode(&mut reader, compress, validate)?;
+        let gamma_g = E::G1Affine::deserialize_with_mode(&mut reader, compress, validate)?;
+        let h = E::G2Affine::deserialize_with_mode(&mut reader, compress, validate)?;
+        let beta_h = Vec::<E::G2Affine>::deserialize_with_mode(&mut reader, compress, validate)?;
+        let num_vars = usize::deserialize_with_mode(&mut reader, compress, validate)?;
+        let supported_degree = usize::deserialize_with_mode(&mut reader, compress, validate)?;
+        let max_degree = usize::deserialize_with_mode(&mut reader, compress, validate)?;
 
         let prepared_beta_h = beta_h.iter().map(|x| x.clone().into()).collect();
         Ok(Self {
@@ -339,55 +332,21 @@ impl<E: PairingEngine> CanonicalDeserialize for VerifierKey<E> {
             max_degree,
         })
     }
-
-    fn deserialize_uncompressed<R: Read>(mut reader: R) -> Result<Self, SerializationError> {
-        let g = E::G1Affine::deserialize_uncompressed(&mut reader)?;
-        let gamma_g = E::G1Affine::deserialize_uncompressed(&mut reader)?;
-        let h = E::G2Affine::deserialize_uncompressed(&mut reader)?;
-        let beta_h = Vec::<E::G2Affine>::deserialize_uncompressed(&mut reader)?;
-        let num_vars = usize::deserialize_uncompressed(&mut reader)?;
-        let supported_degree = usize::deserialize_uncompressed(&mut reader)?;
-        let max_degree = usize::deserialize_uncompressed(&mut reader)?;
-
-        let prepared_beta_h = beta_h.iter().map(|x| x.clone().into()).collect();
-        Ok(Self {
-            g,
-            gamma_g,
-            h,
-            beta_h,
-            prepared_h: h.into(),
-            prepared_beta_h,
-            num_vars,
-            supported_degree,
-            max_degree,
-        })
+    fn deserialize_compressed<R: Read>(reader: R) -> Result<Self, SerializationError> {
+        Self::deserialize_with_mode(reader, Compress::Yes, Validate::Yes)
     }
-
-    fn deserialize_unchecked<R: Read>(mut reader: R) -> Result<Self, SerializationError> {
-        let g = E::G1Affine::deserialize_unchecked(&mut reader)?;
-        let gamma_g = E::G1Affine::deserialize_unchecked(&mut reader)?;
-        let h = E::G2Affine::deserialize_unchecked(&mut reader)?;
-        let beta_h = Vec::<E::G2Affine>::deserialize_unchecked(&mut reader)?;
-        let num_vars = usize::deserialize_unchecked(&mut reader)?;
-        let supported_degree = usize::deserialize_unchecked(&mut reader)?;
-        let max_degree = usize::deserialize_unchecked(&mut reader)?;
-
-        let prepared_beta_h = beta_h.iter().map(|x| x.clone().into()).collect();
-        Ok(Self {
-            g,
-            gamma_g,
-            h,
-            beta_h,
-            prepared_h: h.into(),
-            prepared_beta_h,
-            num_vars,
-            supported_degree,
-            max_degree,
-        })
+    fn deserialize_compressed_unchecked<R: Read>(reader: R) -> Result<Self, SerializationError> {
+        Self::deserialize_with_mode(reader, Compress::Yes, Validate::No)
+    }
+    fn deserialize_uncompressed<R: Read>(reader: R) -> Result<Self, SerializationError> {
+        Self::deserialize_with_mode(reader, Compress::No, Validate::Yes)
+    }
+    fn deserialize_uncompressed_unchecked<R: Read>(reader: R) -> Result<Self, SerializationError> {
+        Self::deserialize_with_mode(reader, Compress::No, Validate::No)
     }
 }
 
-impl<E: PairingEngine> PCVerifierKey for VerifierKey<E> {
+impl<E: Pairing> PCVerifierKey for VerifierKey<E> {
     fn max_degree(&self) -> usize {
         self.max_degree
     }
@@ -400,7 +359,7 @@ impl<E: PairingEngine> PCVerifierKey for VerifierKey<E> {
 /// Nothing to do to prepare this verifier key (for now).
 pub type PreparedVerifierKey<E> = VerifierKey<E>;
 
-impl<E: PairingEngine> PCPreparedVerifierKey<VerifierKey<E>> for PreparedVerifierKey<E> {
+impl<E: Pairing> PCPreparedVerifierKey<VerifierKey<E>> for PreparedVerifierKey<E> {
     /// prepare `PreparedVerifierKey` from `VerifierKey`
     fn prepare(vk: &VerifierKey<E>) -> Self {
         vk.clone()
@@ -418,9 +377,9 @@ impl<E: PairingEngine> PCPreparedVerifierKey<VerifierKey<E>> for PreparedVerifie
 )]
 pub struct Randomness<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     /// A multivariate polynomial where each monomial is univariate with random coefficient
     pub blinding_polynomial: P,
@@ -429,9 +388,9 @@ where
 
 impl<E, P> Randomness<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     /// Does `self` provide any hiding properties to the corresponding commitment?
     /// `self.is_hiding() == true` only if the underlying polynomial is non-zero.
@@ -449,9 +408,9 @@ where
 
 impl<E, P> PCRandomness for Randomness<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     fn empty() -> Self {
         Self {
@@ -474,12 +433,12 @@ where
     }
 }
 
-impl<'a, E: PairingEngine, P: DenseMVPolynomial<E::Fr>> Add<&'a Randomness<E, P>>
+impl<'a, E: Pairing, P: DenseMVPolynomial<E::ScalarField>> Add<&'a Randomness<E, P>>
     for Randomness<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     type Output = Self;
 
@@ -490,16 +449,16 @@ where
     }
 }
 
-impl<'a, E, P> Add<(E::Fr, &'a Randomness<E, P>)> for Randomness<E, P>
+impl<'a, E, P> Add<(E::ScalarField, &'a Randomness<E, P>)> for Randomness<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     type Output = Self;
 
     #[inline]
-    fn add(mut self, other: (E::Fr, &'a Randomness<E, P>)) -> Self {
+    fn add(mut self, other: (E::ScalarField, &'a Randomness<E, P>)) -> Self {
         self += other;
         self
     }
@@ -507,9 +466,9 @@ where
 
 impl<'a, E, P> AddAssign<&'a Randomness<E, P>> for Randomness<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     #[inline]
     fn add_assign(&mut self, other: &'a Self) {
@@ -517,14 +476,14 @@ where
     }
 }
 
-impl<'a, E, P> AddAssign<(E::Fr, &'a Randomness<E, P>)> for Randomness<E, P>
+impl<'a, E, P> AddAssign<(E::ScalarField, &'a Randomness<E, P>)> for Randomness<E, P>
 where
-    E: PairingEngine,
-    P: DenseMVPolynomial<E::Fr>,
-    P::Point: Index<usize, Output = E::Fr>,
+    E: Pairing,
+    P: DenseMVPolynomial<E::ScalarField>,
+    P::Point: Index<usize, Output = E::ScalarField>,
 {
     #[inline]
-    fn add_assign(&mut self, (f, other): (E::Fr, &'a Randomness<E, P>)) {
+    fn add_assign(&mut self, (f, other): (E::ScalarField, &'a Randomness<E, P>)) {
         self.blinding_polynomial += (f, &other.blinding_polynomial);
     }
 }
@@ -539,18 +498,18 @@ where
     PartialEq(bound = ""),
     Eq(bound = "")
 )]
-pub struct Proof<E: PairingEngine> {
+pub struct Proof<E: Pairing> {
     /// Commitments to the witness polynomials
     pub w: Vec<E::G1Affine>,
     /// Evaluation of the random polynomial at the point for which
     /// the evaluation proof was produced.
-    pub random_v: Option<E::Fr>,
+    pub random_v: Option<E::ScalarField>,
 }
 
-impl<E: PairingEngine> PCProof for Proof<E> {
+impl<E: Pairing> PCProof for Proof<E> {
     fn size_in_bytes(&self) -> usize {
         let hiding_size = if self.random_v.is_some() {
-            E::Fr::zero().serialized_size()
+            E::ScalarField::zero().serialized_size()
         } else {
             0
         };
