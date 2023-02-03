@@ -172,6 +172,8 @@ impl<E: PairingEngine> MultilinearPC<E> {
         Commitment { nv, g_product }
     }
 
+    /// commit the given polynomial using the G2 group as a basis
+    /// That means the opening will be in G1.
     pub fn commit_g2(
         ck: &CommitterKey<E>,
         polynomial: &impl MultilinearExtension<E::Fr>,
@@ -236,6 +238,7 @@ impl<E: PairingEngine> MultilinearPC<E> {
         Proof { proofs: proofs }
     }
 
+    /// Create PST opening proof in G1 (with a commitment on G2)
     pub fn open_g1(
         ck: &CommitterKey<E>,
         polynomial: &impl MultilinearExtension<E::Fr>,
@@ -332,6 +335,7 @@ impl<E: PairingEngine> MultilinearPC<E> {
         left == right
     }
 
+    /// Check a polynomial opening proof in G2 and commitment on G1
     pub fn check<'a>(
         vk: &VerifierKey<E>,
         commitment: &Commitment<E>,
