@@ -209,15 +209,16 @@ impl<E: Pairing> MultilinearPC<E> {
                 .collect();
 
             let ph = ck.powers_of_h[i].clone();
+            debug_assert!(ph.len() == scalars.len());
             thread_handles.push(thread::spawn(move || {
                 <E::G2 as VariableBaseMSM>::msm(&ph, &scalars[..])
                     .unwrap()
                     .into_affine()
             }));
         }
-
+        print!("Waiting for threads to finish...");
         let proofs = thread_handles
-            .into_par_iter()
+            .into_iter()
             .map(|h| h.join().unwrap())
             .collect();
 
@@ -282,7 +283,6 @@ impl<E: Pairing> MultilinearPC<E> {
         proof: &ProofG1<E>,
     ) -> bool {
         let left = E::pairing(vk.g, commitment.h_product.into_group() - &vk.h.mul(value));
-        // println!("left is {:?}", left);
 
         let scalar_size = <E::ScalarField as PrimeField>::MODULUS_BIT_SIZE;
         let window_size = FixedBase::get_mul_window_size(vk.nv);
@@ -306,7 +306,6 @@ impl<E: Pairing> MultilinearPC<E> {
             .collect();
 
         let right = E::multi_pairing(pairing_lefts, pairing_rights);
-        // println!("right is {:?}", right);
 
         left == right
     }
@@ -426,7 +425,6 @@ mod tests {
 
         let value = poly.evaluate(&point).unwrap();
         let result = MultilinearPC::check_2(&vk, &com, &point, value, &proof);
-        println!("result: {}", result);
         assert!(result);
     }
 
