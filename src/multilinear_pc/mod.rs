@@ -1,3 +1,5 @@
+use self::data_structures::{CommitmentG2, ProofG1};
+
 use crate::multilinear_pc::data_structures::{
     Commitment, CommitterKey, Proof, UniversalParams, VerifierKey,
 };
@@ -14,7 +16,10 @@ use ark_std::ops::Mul;
 use ark_std::rand::RngCore;
 use ark_std::vec::Vec;
 use ark_std::UniformRand;
-
+use rayon::prelude::*;
+use std::thread;
+// use rayon::iter::ParallelIterator;
+// use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator};
 /// data structures used by multilinear extension commitment scheme
 pub mod data_structures;
 
@@ -46,8 +51,8 @@ impl<E: Pairing> MultilinearPC<E> {
             if i != 0 {
                 let mul = eq.pop_back().unwrap().evaluations;
                 base = base
-                    .into_iter()
-                    .zip(mul.into_iter())
+                    .into_par_iter()
+                    .zip(mul.into_par_iter())
                     .map(|(a, b)| a * &b)
                     .collect();
             }
@@ -94,15 +99,22 @@ impl<E: Pairing> MultilinearPC<E> {
             let g_table = FixedBase::get_window_table(scalar_bits, window_size, g.into_group());
             E::G1::normalize_batch(&FixedBase::msm(scalar_bits, window_size, &g_table, &t))
         };
+
+        let h_mask = {
+            let window_size = FixedBase::get_mul_window_size(num_vars);
+            let h_table = FixedBase::get_window_table(scalar_bits, window_size, h.into_group());
+            E::G2::normalize_batch(&FixedBase::msm(scalar_bits, window_size, &h_table, &t))
+        };
         // end_timer!(vp_generation_timer);
 
         UniversalParams {
             num_vars,
             g,
-            g_mask,
             h,
             powers_of_g,
             powers_of_h,
+            g_mask,
+            h_mask,
         }
     }
 
@@ -127,6 +139,7 @@ impl<E: Pairing> MultilinearPC<E> {
             g: params.g,
             h: params.h,
             g_mask_random: (&params.g_mask[to_reduce..]).to_vec(),
+            h_mask_random: (&params.h_mask[to_reduce..]).to_vec(),
         };
         (ck, vk)
     }
@@ -137,15 +150,27 @@ impl<E: Pairing> MultilinearPC<E> {
         polynomial: &impl MultilinearExtension<E::ScalarField>,
     ) -> Commitment<E> {
         let nv = polynomial.num_vars();
-        let scalars: Vec<_> = polynomial
-            .to_evaluations()
-            .into_iter()
-            .map(|x| x.into_bigint())
-            .collect();
-        let g_product =
-            <E::G1 as VariableBaseMSM>::msm_bigint(&ck.powers_of_g[0], scalars.as_slice())
-                .into_affine();
+        let scalars: Vec<_> = polynomial.to_evaluations();
+        debug_assert!(scalars.len() == ck.powers_of_g[0].len());
+        let g_product = <E::G1 as VariableBaseMSM>::msm(&ck.powers_of_g[0], &scalars[..])
+            .unwrap()
+            .into_affine();
         Commitment { nv, g_product }
+    }
+
+    /// commit the given polynomial using the G2 group as a basis
+    /// That means the opening will be in G1.
+    pub fn commit_g2(
+        ck: &CommitterKey<E>,
+        polynomial: &impl MultilinearExtension<E::ScalarField>,
+    ) -> CommitmentG2<E> {
+        let nv = polynomial.num_vars();
+        let scalars: Vec<_> = polynomial.to_evaluations();
+        debug_assert!(scalars.len() == ck.powers_of_h[0].len());
+        let h_product = <E::G2 as VariableBaseMSM>::msm(&ck.powers_of_h[0], &scalars[..])
+            .unwrap()
+            .into_affine();
+        CommitmentG2 { nv, h_product }
     }
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the same.
@@ -161,7 +186,60 @@ impl<E: Pairing> MultilinearPC<E> {
 
         r[nv] = polynomial.to_evaluations();
 
-        let mut proofs = Vec::new();
+        let mut thread_handles = vec![];
+        for i in 0..nv {
+            let k = nv - i;
+            let point_at_k = point[i];
+            q[k] = (0..(1 << (k - 1)))
+                .into_iter()
+                .map(|_| E::ScalarField::zero())
+                .collect();
+            r[k - 1] = (0..(1 << (k - 1)))
+                .into_iter()
+                .map(|_| E::ScalarField::zero())
+                .collect();
+            for b in 0..(1 << (k - 1)) {
+                q[k][b] = r[k][(b << 1) + 1] - &r[k][b << 1];
+                r[k - 1][b] = r[k][b << 1] * &(E::ScalarField::one() - &point_at_k)
+                    + &(r[k][(b << 1) + 1] * &point_at_k);
+            }
+            let scalars: Vec<_> = (0..(1 << k))
+                .into_iter()
+                .map(|x| q[k][x >> 1]) // fine
+                .collect();
+
+            let ph = ck.powers_of_h[i].clone();
+            debug_assert!(ph.len() == scalars.len());
+            thread_handles.push(thread::spawn(move || {
+                <E::G2 as VariableBaseMSM>::msm(&ph, &scalars[..])
+                    .unwrap()
+                    .into_affine()
+            }));
+        }
+        print!("Waiting for threads to finish...");
+        let proofs = thread_handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+
+        Proof { proofs: proofs }
+    }
+
+    /// Create PST opening proof in G1 (with a commitment on G2)
+    pub fn open_g1(
+        ck: &CommitterKey<E>,
+        polynomial: &impl MultilinearExtension<E::ScalarField>,
+        point: &[E::ScalarField],
+    ) -> ProofG1<E> {
+        assert_eq!(polynomial.num_vars(), ck.nv, "Invalid size of polynomial");
+        let nv = polynomial.num_vars();
+        let mut r: Vec<Vec<E::ScalarField>> = (0..nv + 1).map(|_| Vec::new()).collect();
+        let mut q: Vec<Vec<E::ScalarField>> = (0..nv + 1).map(|_| Vec::new()).collect();
+
+        r[nv] = polynomial.to_evaluations();
+
+        let mut thread_handles = vec![];
+
         for i in 0..nv {
             let k = nv - i;
             let point_at_k = point[i];
@@ -177,19 +255,62 @@ impl<E: Pairing> MultilinearPC<E> {
                     + &(r[k][(b << 1) + 1] * &point_at_k);
             }
             let scalars: Vec<_> = (0..(1 << k))
-                .map(|x| q[k][x >> 1].into_bigint()) // fine
+                .map(|x| q[k][x >> 1]) // fine
                 .collect();
-
-            let pi_h =
-                <E::G2 as VariableBaseMSM>::msm_bigint(&ck.powers_of_h[i], &scalars).into_affine(); // no need to move outside and partition
-            proofs.push(pi_h);
+            let pg = ck.powers_of_g[i].clone();
+            thread_handles.push(thread::spawn(move || {
+                <E::G1 as VariableBaseMSM>::msm(&pg, &scalars[..])
+                    .unwrap()
+                    .into_affine()
+            }));
         }
 
-        Proof { proofs }
+        let proofs = thread_handles
+            .into_iter()
+            .map(|g| g.join().unwrap())
+            .collect();
+
+        ProofG1 { proofs: proofs }
     }
 
     /// Verifies that `value` is the evaluation at `x` of the polynomial
     /// committed inside `comm`.
+    pub fn check_2<'a>(
+        vk: &VerifierKey<E>,
+        commitment: &CommitmentG2<E>,
+        point: &[E::ScalarField],
+        value: E::ScalarField,
+        proof: &ProofG1<E>,
+    ) -> bool {
+        let left = E::pairing(vk.g, commitment.h_product.into_group() - &vk.h.mul(value));
+
+        let scalar_size = <E::ScalarField as PrimeField>::MODULUS_BIT_SIZE;
+        let window_size = FixedBase::get_mul_window_size(vk.nv);
+
+        let h_table =
+            FixedBase::get_window_table(scalar_size as usize, window_size, vk.h.into_group());
+        let h_mul: Vec<E::G2> = FixedBase::msm(scalar_size as usize, window_size, &h_table, point);
+
+        let pairing_rights: Vec<_> = (0..vk.nv)
+            .into_iter()
+            .map(|i| vk.h_mask_random[i].into_group() - &h_mul[i])
+            .collect();
+        let pairing_rights: Vec<E::G2Prepared> = E::G2::normalize_batch(&pairing_rights)
+            .into_iter()
+            .map(|p| E::G2Prepared::from(p))
+            .collect();
+        let pairing_lefts: Vec<E::G1Prepared> = proof
+            .proofs
+            .iter()
+            .map(|p| E::G1Prepared::from(p))
+            .collect();
+
+        let right = E::multi_pairing(pairing_lefts, pairing_rights);
+
+        left == right
+    }
+
+    /// Check a polynomial opening proof in G2 and commitment on G1
     pub fn check<'a>(
         vk: &VerifierKey<E>,
         commitment: &Commitment<E>,
@@ -206,6 +327,7 @@ impl<E: Pairing> MultilinearPC<E> {
         let g_mul: Vec<E::G1> = FixedBase::msm(scalar_size, window_size, &g_table, point);
 
         let pairing_lefts: Vec<_> = (0..vk.nv)
+            .into_iter()
             .map(|i| vk.g_mask_random[i].into_group() - &g_mul[i])
             .collect();
         let pairing_lefts: Vec<E::G1Affine> = E::G1::normalize_batch(&pairing_lefts);
@@ -241,7 +363,7 @@ fn remove_dummy_variable<F: Field>(poly: &[F], pad: usize) -> Vec<F> {
 /// generate eq(t,x), a product of multilinear polynomials with fixed t.
 /// eq(a,b) is takes extensions of a,b in {0,1}^num_vars such that if a and b in {0,1}^num_vars are equal
 /// then this polynomial evaluates to 1.
-fn eq_extension<F: Field>(t: &[F]) -> Vec<DenseMultilinearExtension<F>> {
+pub fn eq_extension<F: Field>(t: &[F]) -> Vec<DenseMultilinearExtension<F>> {
     let dim = t.len();
     let mut result = Vec::new();
     for i in 0..dim {
@@ -287,6 +409,45 @@ mod tests {
         let value = poly.evaluate(&point).unwrap();
         let result = MultilinearPC::check(&vk, &com, &point, value, &proof);
         assert!(result);
+    }
+
+    fn test_polynomial_g2<R: RngCore>(
+        uni_params: &UniversalParams<E>,
+        poly: &impl MultilinearExtension<Fr>,
+        rng: &mut R,
+    ) {
+        let nv = poly.num_vars();
+        assert_ne!(nv, 0);
+        let (ck, vk) = MultilinearPC::<E>::trim(&uni_params, nv);
+        let point: Vec<_> = (0..nv).map(|_| Fr::rand(rng)).collect();
+        let com = MultilinearPC::commit_g2(&ck, poly);
+        let proof = MultilinearPC::open_g1(&ck, poly, &point);
+
+        let value = poly.evaluate(&point).unwrap();
+        let result = MultilinearPC::check_2(&vk, &com, &point, value, &proof);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_commit_on_g2_short() {
+        let mut rng = test_rng();
+
+        // normal polynomials
+        let uni_params = MultilinearPC::setup(2, &mut rng);
+
+        let poly1 = DenseMultilinearExtension::rand(2, &mut rng);
+        test_polynomial_g2(&uni_params, &poly1, &mut rng);
+    }
+
+    #[test]
+    fn test_commit_on_g2_long() {
+        let mut rng = test_rng();
+
+        // normal polynomials
+        let uni_params = MultilinearPC::setup(10, &mut rng);
+
+        let poly1 = DenseMultilinearExtension::rand(10, &mut rng);
+        test_polynomial_g2(&uni_params, &poly1, &mut rng);
     }
 
     #[test]

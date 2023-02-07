@@ -31,6 +31,7 @@ ark-std = { version = "^0.4.0", default-features = false }
 ark-relations = { version = "^0.4.0", default-features = false, optional = true }
 ark-r1cs-std = { version = "^0.4.0", default-features = false, optional = true }
 hashbrown = { version = "0.9", optional = true }
+colored = "2"
 
 digest = "0.9"
 rayon = { version = "1", optional = true }
