@@ -191,11 +191,11 @@ impl<E: Pairing> MultilinearPC<E> {
             let k = nv - i;
             let point_at_k = point[i];
             q[k] = (0..(1 << (k - 1)))
-                .into_par_iter()
+                .into_iter()
                 .map(|_| E::ScalarField::zero())
                 .collect();
             r[k - 1] = (0..(1 << (k - 1)))
-                .into_par_iter()
+                .into_iter()
                 .map(|_| E::ScalarField::zero())
                 .collect();
             for b in 0..(1 << (k - 1)) {
@@ -204,7 +204,7 @@ impl<E: Pairing> MultilinearPC<E> {
                     + &(r[k][(b << 1) + 1] * &point_at_k);
             }
             let scalars: Vec<_> = (0..(1 << k))
-                .into_par_iter()
+                .into_iter()
                 .map(|x| q[k][x >> 1]) // fine
                 .collect();
 
@@ -296,7 +296,7 @@ impl<E: Pairing> MultilinearPC<E> {
             .map(|i| vk.h_mask_random[i].into_group() - &h_mul[i])
             .collect();
         let pairing_rights: Vec<E::G2Prepared> = E::G2::normalize_batch(&pairing_rights)
-            .into_par_iter()
+            .into_iter()
             .map(|p| E::G2Prepared::from(p))
             .collect();
         let pairing_lefts: Vec<E::G1Prepared> = proof
@@ -327,18 +327,18 @@ impl<E: Pairing> MultilinearPC<E> {
         let g_mul: Vec<E::G1> = FixedBase::msm(scalar_size, window_size, &g_table, point);
 
         let pairing_lefts: Vec<_> = (0..vk.nv)
-            .into_par_iter()
+            .into_iter()
             .map(|i| vk.g_mask_random[i].into_group() - &g_mul[i])
             .collect();
         let pairing_lefts: Vec<E::G1Affine> = E::G1::normalize_batch(&pairing_lefts);
         let pairing_lefts: Vec<E::G1Prepared> = pairing_lefts
-            .into_par_iter()
+            .into_iter()
             .map(|x| E::G1Prepared::from(x))
             .collect();
 
         let pairing_rights: Vec<E::G2Prepared> = proof
             .proofs
-            .par_iter()
+            .iter()
             .map(|x| E::G2Prepared::from(*x))
             .collect();
 
@@ -429,13 +429,24 @@ mod tests {
     }
 
     #[test]
-    fn test_poly() {
+    fn test_commit_on_g2_short() {
         let mut rng = test_rng();
 
         // normal polynomials
         let uni_params = MultilinearPC::setup(2, &mut rng);
 
         let poly1 = DenseMultilinearExtension::rand(2, &mut rng);
+        test_polynomial_g2(&uni_params, &poly1, &mut rng);
+    }
+
+    #[test]
+    fn test_commit_on_g2_long() {
+        let mut rng = test_rng();
+
+        // normal polynomials
+        let uni_params = MultilinearPC::setup(10, &mut rng);
+
+        let poly1 = DenseMultilinearExtension::rand(10, &mut rng);
         test_polynomial_g2(&uni_params, &poly1, &mut rng);
     }
 
