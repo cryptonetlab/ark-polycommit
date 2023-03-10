@@ -150,9 +150,15 @@ impl<E: Pairing> MultilinearPC<E> {
         polynomial: &impl MultilinearExtension<E::ScalarField>,
     ) -> Commitment<E> {
         let nv = polynomial.num_vars();
+        debug_assert!(nv <= ck.nv);
+
         let scalars: Vec<_> = polynomial.to_evaluations();
-        debug_assert!(scalars.len() == ck.powers_of_g[0].len());
-        let g_product = <E::G1 as VariableBaseMSM>::msm(&ck.powers_of_g[0], &scalars[..])
+        // powers_of_g starts with the longest crs so we need to find the
+        // one matching the polynomial's number of variables
+        let mut powers_of_g = ck.powers_of_g[ck.nv - nv].clone();
+        debug_assert!(scalars.len() == powers_of_g.len());
+
+        let g_product = <E::G1 as VariableBaseMSM>::msm(&powers_of_g, &scalars[..])
             .unwrap()
             .into_affine();
         Commitment { nv, g_product }
@@ -165,9 +171,14 @@ impl<E: Pairing> MultilinearPC<E> {
         polynomial: &impl MultilinearExtension<E::ScalarField>,
     ) -> CommitmentG2<E> {
         let nv = polynomial.num_vars();
+        debug_assert!(nv <= ck.nv);
+
         let scalars: Vec<_> = polynomial.to_evaluations();
-        debug_assert!(scalars.len() == ck.powers_of_h[0].len());
-        let h_product = <E::G2 as VariableBaseMSM>::msm(&ck.powers_of_h[0], &scalars[..])
+        // powers_of_g starts with the longest crs so we need to find the
+        // one matching the polynomial's number of variables
+        let mut powers_of_h = ck.powers_of_h[ck.nv - nv].clone();
+        debug_assert!(scalars.len() == powers_of_h.len());
+        let h_product = <E::G2 as VariableBaseMSM>::msm(&powers_of_h, &scalars[..])
             .unwrap()
             .into_affine();
         CommitmentG2 { nv, h_product }
@@ -179,13 +190,14 @@ impl<E: Pairing> MultilinearPC<E> {
         polynomial: &impl MultilinearExtension<E::ScalarField>,
         point: &[E::ScalarField],
     ) -> Proof<E> {
-        assert_eq!(polynomial.num_vars(), ck.nv, "Invalid size of polynomial");
         let nv = polynomial.num_vars();
+        assert!(nv <= ck.nv, "Invalid size of polynomial");
         let mut r: Vec<Vec<E::ScalarField>> = (0..nv + 1).map(|_| Vec::new()).collect();
         let mut q: Vec<Vec<E::ScalarField>> = (0..nv + 1).map(|_| Vec::new()).collect();
 
         r[nv] = polynomial.to_evaluations();
-
+        // adjust the crs to start from the correct number of variables
+        let powers_of_h = ck.powers_of_h[ck.nv - nv..].to_vec();
         let mut thread_handles = vec![];
         for i in 0..nv {
             let k = nv - i;
@@ -208,8 +220,7 @@ impl<E: Pairing> MultilinearPC<E> {
                 .map(|x| q[k][x >> 1]) // fine
                 .collect();
 
-            let ph = ck.powers_of_h[i].clone();
-            debug_assert!(ph.len() == scalars.len());
+            let mut ph = powers_of_h[i].to_vec();
             thread_handles.push(thread::spawn(move || {
                 <E::G2 as VariableBaseMSM>::msm(&ph, &scalars[..])
                     .unwrap()
@@ -231,15 +242,17 @@ impl<E: Pairing> MultilinearPC<E> {
         polynomial: &impl MultilinearExtension<E::ScalarField>,
         point: &[E::ScalarField],
     ) -> ProofG1<E> {
-        assert_eq!(polynomial.num_vars(), ck.nv, "Invalid size of polynomial");
         let nv = polynomial.num_vars();
+        assert!(nv <= ck.nv, "Invalid size of polynomial");
+
         let mut r: Vec<Vec<E::ScalarField>> = (0..nv + 1).map(|_| Vec::new()).collect();
         let mut q: Vec<Vec<E::ScalarField>> = (0..nv + 1).map(|_| Vec::new()).collect();
 
         r[nv] = polynomial.to_evaluations();
 
         let mut thread_handles = vec![];
-
+        // adjust the crs to start from the correct number of variables
+        let powers_of_g = ck.powers_of_g[ck.nv - nv..].to_vec();
         for i in 0..nv {
             let k = nv - i;
             let point_at_k = point[i];
@@ -257,7 +270,7 @@ impl<E: Pairing> MultilinearPC<E> {
             let scalars: Vec<_> = (0..(1 << k))
                 .map(|x| q[k][x >> 1]) // fine
                 .collect();
-            let pg = ck.powers_of_g[i].clone();
+            let mut pg = powers_of_g[i].to_vec();
             thread_handles.push(thread::spawn(move || {
                 <E::G1 as VariableBaseMSM>::msm(&pg, &scalars[..])
                     .unwrap()
@@ -283,17 +296,18 @@ impl<E: Pairing> MultilinearPC<E> {
         proof: &ProofG1<E>,
     ) -> bool {
         let left = E::pairing(vk.g, commitment.h_product.into_group() - &vk.h.mul(value));
+        let nv = point.len();
 
         let scalar_size = <E::ScalarField as PrimeField>::MODULUS_BIT_SIZE;
-        let window_size = FixedBase::get_mul_window_size(vk.nv);
+        let window_size = FixedBase::get_mul_window_size(nv);
 
         let h_table =
             FixedBase::get_window_table(scalar_size as usize, window_size, vk.h.into_group());
         let h_mul: Vec<E::G2> = FixedBase::msm(scalar_size as usize, window_size, &h_table, point);
-
-        let pairing_rights: Vec<_> = (0..vk.nv)
+        let h_mask_random = vk.h_mask_random[vk.nv - nv..].to_vec();
+        let pairing_rights: Vec<_> = (0..nv)
             .into_iter()
-            .map(|i| vk.h_mask_random[i].into_group() - &h_mul[i])
+            .map(|i| h_mask_random[i].into_group() - &h_mul[i])
             .collect();
         let pairing_rights: Vec<E::G2Prepared> = E::G2::normalize_batch(&pairing_rights)
             .into_iter()
@@ -319,16 +333,17 @@ impl<E: Pairing> MultilinearPC<E> {
         proof: &Proof<E>,
     ) -> bool {
         let left = E::pairing(commitment.g_product.into_group() - &vk.g.mul(value), vk.h);
+        let nv = point.len();
 
         let scalar_size = E::ScalarField::MODULUS_BIT_SIZE as usize;
-        let window_size = FixedBase::get_mul_window_size(vk.nv);
+        let window_size = FixedBase::get_mul_window_size(nv);
 
         let g_table = FixedBase::get_window_table(scalar_size, window_size, vk.g.into_group());
         let g_mul: Vec<E::G1> = FixedBase::msm(scalar_size, window_size, &g_table, point);
-
-        let pairing_lefts: Vec<_> = (0..vk.nv)
+        let g_mask_random = vk.g_mask_random[vk.nv - nv..].to_vec();
+        let pairing_lefts: Vec<_> = (0..nv)
             .into_iter()
-            .map(|i| vk.g_mask_random[i].into_group() - &g_mul[i])
+            .map(|i| g_mask_random[i].into_group() - &g_mul[i])
             .collect();
         let pairing_lefts: Vec<E::G1Affine> = E::G1::normalize_batch(&pairing_lefts);
         let pairing_lefts: Vec<E::G1Prepared> = pairing_lefts
